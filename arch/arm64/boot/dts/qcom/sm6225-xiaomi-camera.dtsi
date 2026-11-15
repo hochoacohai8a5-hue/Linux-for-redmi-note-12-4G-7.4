@@ -1,0 +1,428 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
+/*
+ * Copyright (c) 2026, onurbuber@engineer.com
+ *
+ * Xiaomi Redmi Note 12 4G - camera front end and the modules hanging
+ * off it.
+ */
+
+/ {
+	/*
+	 * Power for the rear main camera voice coil motor. The vendor DT shows
+	 * it as a fixed 2.8 V regulator gated by TLMM 101 rather than a PMIC
+	 * LDO, even though the upstream reference board description points at
+	 * PM8008 LDO5 (that chip is disabled on this design and does not
+	 * answer on I2C).
+	 */
+	cam_vaf_2p8: cam-vaf-regulator {
+		compatible = "regulator-fixed";
+		regulator-name = "cam_vaf_2p8";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		regulator-always-on;
+		gpio = <&tlmm 101 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+};
+
+&i2c1 {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	/*
+	 * Camera PMIC. Its four LDOs feed the sensor digital and analog
+	 * rails. Nothing claims them yet because the camera pipeline is not
+	 * supported in mainline, so the rails are left always-on to keep the
+	 * hardware in the state the bootloader left it in.
+	 */
+	wl2866d: pmic@28 {
+		compatible = "willsemi,wl2866d";
+		reg = <0x28>;
+		enable-gpios = <&tlmm 26 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&wl2866d_default>;
+
+		regulators {
+			wl2866d_dvdd1: dvdd1 {
+				regulator-name = "dvdd1";
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <1200000>;
+				regulator-always-on;
+			};
+
+			wl2866d_dvdd2: dvdd2 {
+				regulator-name = "dvdd2";
+				regulator-min-microvolt = <1050000>;
+				regulator-max-microvolt = <1050000>;
+				regulator-always-on;
+			};
+
+			wl2866d_avdd1: avdd1 {
+				regulator-name = "avdd1";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+				regulator-always-on;
+			};
+
+			wl2866d_avdd2: avdd2 {
+				regulator-name = "avdd2";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-always-on;
+			};
+		};
+	};
+};
+
+/*
+ * Camera front end.
+ *
+ * The rear main sensor is wired to CSIPHY0 on CCI bus 0 and the front one to
+ * CSIPHY2 on CCI bus 1. The remaining two modules are not described yet
+ * because mainline has no driver for either of them: the ultra wide answers
+ * with the ov08a10 chip ID and the macro with the gc02m1 one, neither of
+ * which matches the module names the vendor ships. The rear main rail
+ * assignment also differs from the rest: it is the only module that takes its
+ * core rail from WL2866D DVDD2 and its analog rail from AVDD2, while
+ * everything else runs off AVDD1.
+ *
+ * The addresses and the power sequencing below come from the vendor camera
+ * stack, which prints "Probe success, slot:N, slave_addr:0xXX" and every
+ * WL2866D regulator transition while it brings a module up. The address in
+ * that log is the 8-bit one, so the 7-bit address is half of it.
+ *
+ *   slot 0  addr 0x20 (0x10)  CCI 0  MCLK0  reset gpio18  s5kjn1  rear main
+ *   slot 1  addr 0x20 (0x10)  CCI 1  MCLK1  reset gpio24  s5k3l6  front
+ *   slot 2  addr 0x6c (0x36)  CCI 1  MCLK2  reset gpio19  ov08a10 rear ultra
+ *   slot 3  addr 0x6e (0x37)  CCI 0  MCLK3  reset gpio68  gc02m1  rear macro
+ */
+&cci {
+	status = "okay";
+};
+
+&cci_i2c0 {
+	clock-frequency = <400000>;
+
+	camera@10 {
+		compatible = "samsung,s5kjn1";
+		reg = <0x10>;
+
+		reset-gpios = <&tlmm 18 GPIO_ACTIVE_LOW>;
+
+		clocks = <&gcc GCC_CAMSS_MCLK0_CLK>;
+		assigned-clocks = <&gcc GCC_CAMSS_MCLK0_CLK>;
+		assigned-clock-rates = <24000000>;
+
+		/*
+		 * The MCLK this sensor enables at probe sits inside the CAMSS
+		 * top GDSC, so the domain has to be on for the chip ID read to
+		 * work at all.
+		 */
+		power-domains = <&gcc GCC_CAMSS_TOP_GDSC>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_mclk0_default>;
+
+		vdda-supply = <&wl2866d_avdd1>;
+		vddd-supply = <&wl2866d_dvdd2>;
+		vddio-supply = <&wl2866d_avdd2>;
+
+		/*
+		 * The module is soldered with its pixel array turned a quarter
+		 * turn against the phone body, so the frames come out rotated
+		 * 90 degrees counter-clockwise and need the opposite correction.
+		 * This matches sensor-position-roll = <270> in the vendor DT.
+		 */
+		rotation = <90>;
+		orientation = <1>;
+
+		lens-focus = <&rear_vcm>;
+
+		port {
+			camera_s5kjn1_ep: endpoint {
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <700000000>;
+				remote-endpoint = <&csiphy0_ep>;
+			};
+		};
+	};
+
+	/*
+	 * The rear main module carries a 32 KiB calibration EEPROM with the
+	 * per-unit focus codes, white balance, lens shading and PDAF data;
+	 * the vendor module description puts it at 0xA2, and the device
+	 * responds up to 0x7fff and wraps there, so it is a 24C256. The
+	 * vendor part name is not recorded anywhere in the module data and
+	 * 24-series EEPROMs have no identification register, so the generic
+	 * compatible is used. Exposed read-only for userspace tuning.
+	 */
+	eeprom@51 {
+		compatible = "atmel,24c256";
+		reg = <0x51>;
+		vcc-supply = <&wl2866d_avdd2>;
+		read-only;
+	};
+
+	/*
+	 * Voice coil motor for the rear main lens. It is a Giantec GT9764,
+	 * which uses the DW9800K register layout: 0x02 enables ringing,
+	 * 0x06 selects the SAC mode and 0x07 the VCM prescaler. The vendor
+	 * module description reports address 0x0c, a 10 bit DAC and an
+	 * initial code of 367; the vendor init writes 0x06 = 0x40 (SAC mode
+	 * 1) and 0x07 = 0x67. The analog rail is the camera VAF switch on
+	 * TLMM 101.
+	 */
+	rear_vcm: lens@c {
+		compatible = "giantec,gt9764", "dongwoon,dw9800k";
+		reg = <0x0c>;
+
+		vdd-supply = <&cam_vaf_2p8>;
+		vin-supply = <&wl2866d_avdd2>;
+
+		dongwoon,sac-mode = <1>;
+		dongwoon,vcm-prescale = <0x67>;
+
+		/*
+		 * The module description carries initialCode = 367 for this
+		 * lens, which is the position the factory leaves it in. Park
+		 * the lens there at power on so that an application which
+		 * never touches the focus control still gets a usable image.
+		 */
+		dongwoon,default-position = <367>;
+	};
+};
+
+&cci_i2c1 {
+	clock-frequency = <400000>;
+
+	/*
+	 * The front module sits on the second CCI bus and drives CSIPHY2. It
+	 * is the only module that runs its master clock at 19.2 MHz; the
+	 * driver derives the PLL multiplier from it.
+	 */
+	camera@10 {
+		compatible = "samsung,s5k3l6";
+		reg = <0x10>;
+
+		reset-gpios = <&tlmm 24 GPIO_ACTIVE_LOW>;
+
+		clocks = <&gcc GCC_CAMSS_MCLK1_CLK>;
+		assigned-clocks = <&gcc GCC_CAMSS_MCLK1_CLK>;
+		assigned-clock-rates = <19200000>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_mclk1_default>;
+
+		vdda-supply = <&wl2866d_avdd1>;
+		vddd-supply = <&wl2866d_dvdd1>;
+		vddio-supply = <&wl2866d_avdd2>;
+
+		/*
+		 * Same quarter turn as the rear module, but this one looks at
+		 * the user. Reporting it as a back camera makes applications
+		 * skip the mirror they apply to the front preview, which turns
+		 * the image the wrong way once the device is held sideways.
+		 */
+		rotation = <90>;
+		orientation = <0>;
+
+		port {
+			camera_s5k3l6_ep: endpoint {
+				data-lanes = <1 2>;
+				link-frequencies = /bits/ 64
+					<537500000 600000000 625000000>;
+				remote-endpoint = <&csiphy2_ep>;
+			};
+		};
+	};
+
+	/*
+	 * The ultra wide module is an OV08D10 behind the CSI lane mux.  The
+	 * vendor calls it by that name and the sensor reports an 8 MP array,
+	 * which is what this driver expects; the 0x5647 in the vendor probe
+	 * log is the expected id from the module description, not a readout.
+	 */
+	camera@36 {
+		compatible = "ovti,ov08d10";
+		reg = <0x36>;
+
+		reset-gpios = <&tlmm 19 GPIO_ACTIVE_LOW>;
+
+		clocks = <&gcc GCC_CAMSS_MCLK2_CLK>;
+		assigned-clocks = <&gcc GCC_CAMSS_MCLK2_CLK>;
+		assigned-clock-rates = <19200000>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_mclk2_default>;
+
+		avdd-supply = <&wl2866d_avdd1>;
+		dvdd-supply = <&wl2866d_dvdd1>;
+		dovdd-supply = <&wl2866d_avdd2>;
+
+		/*
+		 * The module faces the same way as the rear main sensor but its
+		 * pixel array is turned the other way round, so the correction
+		 * is 270 degrees here rather than the 90 reported for the other
+		 * back cameras.
+		 */
+		rotation = <270>;
+		orientation = <1>;
+
+		port {
+			camera_ov08d10_ep: endpoint {
+				data-lanes = <1 2>;
+				link-frequencies = /bits/ 64 <720000000 360000000>;
+				remote-endpoint = <&csiphy1_ep>;
+			};
+		};
+	};
+
+	/*
+	 * The flash sits on the second CCI bus at 7-bit address 0x64. The
+	 * vendor kernel never reads that address from the device tree either:
+	 * it is hard coded in cam_flash_dev.c as 0xc8 >> 1, together with CCI
+	 * master 1 and the fast mode clock rate, which is what this bus runs
+	 * at. The STROBE line is left unconnected: this board pulses the LED
+	 * through the mode register, as the vendor stack does.
+	 */
+	flash@64 {
+		compatible = "kinetic,ktd2691";
+		reg = <0x64>;
+
+		led {
+			function = LED_FUNCTION_FLASH;
+			color = <LED_COLOR_ID_WHITE>;
+
+			/*
+			 * Deliberately conservative. The part can drive 1.5 A
+			 * into a flash pulse and 376 mA continuously into the
+			 * torch, and the vendor stack programs about 1020 mA
+			 * and 132 mA. Nothing here has been characterised on
+			 * this LED yet, so the ceilings are set well below
+			 * those: a 500 mA pulse for at most 200 ms, and 132 mA
+			 * for the torch, which is the vendor torch level.
+			 */
+			flash-max-microamp = <500000>;
+			led-max-microamp = <132000>;
+			flash-max-timeout-us = <200000>;
+		};
+	};
+};
+
+/*
+ * The CSIPHY/CSID/TFE instance 0 carries the rear main camera. Only the
+ * CSIPHY port needs a description: the driver links every CSIPHY to every
+ * CSID and every CSID line to every TFE line on its own, so the DT only has
+ * to identify which phy the sensor is attached to and how many lanes it
+ * uses.
+ */
+&camss {
+	/* The PHY runs off PM6125 L4 (0.9 V core) and L18 (1.2 V I/O). */
+	vdd-csiphy-0p9-supply = <&pm6125_l4>;
+	vdd-csiphy-1p2-supply = <&pm6125_l18>;
+
+	status = "okay";
+
+	ports {
+		port@0 {
+			reg = <0>;
+
+			csiphy0_ep: endpoint {
+				data-lanes = <0 1 2 3>;
+				bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
+				remote-endpoint = <&camera_s5kjn1_ep>;
+			};
+		};
+
+		port@1 {
+			reg = <1>;
+
+			csiphy1_ep: endpoint {
+				data-lanes = <0 1>;
+				bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
+				remote-endpoint = <&camera_ov08d10_ep>;
+			};
+		};
+
+		port@2 {
+			reg = <2>;
+
+			csiphy2_ep: endpoint {
+				data-lanes = <0 1>;
+				bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
+				remote-endpoint = <&camera_s5k3l6_ep>;
+			};
+		};
+	};
+};
+
+&tlmm {
+	/* GPIO26: WL2866D camera PMIC enable (EN) pin */
+	wl2866d_default: wl2866d-default-state {
+		pins = "gpio26";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+		output-high;
+	};
+	/* GPIO20/21/27/28 are the four camera master clocks. */
+	cam_mclk0_default: cam-mclk0-default-state {
+		pins = "gpio20";
+		function = "cam_mclk";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_mclk1_default: cam-mclk1-default-state {
+		pins = "gpio21";
+		function = "cam_mclk";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_mclk2_default: cam-mclk2-default-state {
+		pins = "gpio27";
+		function = "cam_mclk";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	cam_mclk3_default: cam-mclk3-default-state {
+		pins = "gpio28";
+		function = "cam_mclk";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	/*
+	 * Resource lines that belong to the modules without a mainline driver.
+	 * Holding the resets deasserted keeps them out of reset, which is what
+	 * the vendor boot chain leaves behind.
+	 */
+	camera_aux_resets: camera-aux-resets {
+		gpio-hog;
+		gpios = <68 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "camera auxiliary resets deasserted";
+	};
+
+	/*
+	 * The rear ultra wide sits behind a CSI lane mux on this board; the
+	 * select line has to be high for it.
+	 */
+	camera_csi_mux: camera-csi-mux {
+		gpio-hog;
+		gpios = <100 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "camera csi mux select (ultra wide)";
+	};
+
+	/* VIO enable for the macro module. */
+	camera_macro_vio: camera-macro-vio {
+		gpio-hog;
+		gpios = <99 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "camera macro vio enable";
+	};
+};

@@ -1,0 +1,83 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
+/*
+ * Copyright (c) 2026, onurbuber@engineer.com
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/usb/pd.h>
+#include <dt-bindings/leds/common.h>
+#include <dt-bindings/media/video-interfaces.h>
+#include <dt-bindings/sound/qcom,q6dsp-lpass-ports.h>
+#include "sm6225.dtsi"
+#include "pm6125.dtsi"
+#include "sm6225-xiaomi-common.dtsi"
+#include "sm6225-xiaomi-camera.dtsi"
+#include "sm6225-xiaomi-charger.dtsi"
+
+/ {
+	model = "Xiaomi Redmi Note 12 4G NFC";
+	compatible = "xiaomi,topaz", "qcom,sm6225";
+	chassis-type = "handset";
+
+	/* required for bootloader to select correct board */
+	qcom,msm-id = <518 0x10000>;
+	qcom,board-id = <0x30022 0>;
+};
+
+/*
+ * The NFC controller is an NXP SN-series part on the first QUP I2C bus. The
+ * vendor node wires its interrupt to TLMM 70 and its enable to TLMM 2, while
+ * the vendor pin groups describe the enable on TLMM 69 instead; both are kept
+ * here as the vendor sources have them. The clock request pin is left out
+ * because its vendor pin group names no pins. No mainline driver matches this
+ * part, so the node stays disabled and the bus is not brought up either.
+ */
+&i2c0 {
+	nfc@28 {
+		compatible = "nxp,sn-nci";
+		reg = <0x28>;
+
+		interrupt-parent = <&tlmm>;
+		interrupts = <70 IRQ_TYPE_NONE>;
+
+		nxp,sn-irq = <&tlmm 70 GPIO_ACTIVE_HIGH>;
+		nxp,sn-ven-rstn = <&tlmm 2 GPIO_ACTIVE_HIGH>;
+
+		pinctrl-names = "nfc_active", "nfc_suspend";
+		pinctrl-0 = <&nfc_int_active &nfc_enable_active>;
+		pinctrl-1 = <&nfc_int_suspend &nfc_enable_suspend>;
+
+		status = "disabled";
+	};
+};
+
+&tlmm {
+	nfc_int_active: nfc-int-active-state {
+		pins = "gpio70";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+
+	nfc_int_suspend: nfc-int-suspend-state {
+		pins = "gpio70";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+
+	nfc_enable_active: nfc-enable-active-state {
+		pins = "gpio69";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+
+	nfc_enable_suspend: nfc-enable-suspend-state {
+		pins = "gpio69";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+};

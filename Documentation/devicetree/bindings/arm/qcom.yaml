@@ -1088,6 +1088,7 @@ properties:
       - items:
           - enum:
               - xiaomi,tapas
+              - xiaomi,topaz
           - const: qcom,sm6225
 
       - items:

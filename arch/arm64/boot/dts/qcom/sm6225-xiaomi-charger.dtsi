@@ -1,0 +1,79 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR BSD-3-Clause)
+/*
+ * Copyright (c) 2026, onurbuber@engineer.com
+ */
+/*
+ * Xiaomi Redmi Note 12 4G - the charge pumps. The board is built with one of
+ * two divider pumps on the same I2C bus and the same interrupt line, so both
+ * are described here and only the one that is populated is enabled. The fuel
+ * gauge, the charger and the Type-C sink controller are on every board and
+ * live in sm6225-xiaomi-common.dtsi.
+ */
+
+&i2c1 {
+	/*
+	 * The board carries a second charge pump beside the SC8551: a Lionsemi
+	 * LN8000 on the same bus, wired to the same interrupt line, and only
+	 * one of the two is populated depending on the build. This unit has the
+	 * SC8551 and mainline has no driver for the LN8000, so the node is
+	 * described for completeness and left disabled. The limits below are
+	 * the ones the vendor programming sequence leaves in the part.
+	 */
+	ln8000_charger@51 {
+		compatible = "lionsemi,ln8000-master";
+		reg = <0x51>;
+
+		interrupt-parent = <&tlmm>;
+		interrupts = <84 IRQ_TYPE_EDGE_FALLING>;
+
+		ln8000_charger,bat-ovp-threshold = <4550>;
+		ln8000_charger,bat-ovp-alarm-threshold = <4525>;
+		ln8000_charger,bus-ovp-threshold = <13000>;
+		ln8000_charger,bus-ovp-alarm-threshold = <11000>;
+		ln8000_charger,bus-ocp-threshold = <3750>;
+		ln8000_charger,bus-ocp-alarm-threshold = <3500>;
+		ln8000_charger,ntc-alarm-cfg = <226>;
+		ln8000_charger,ext_ovp_ctrl = <0>;
+		ln8000_charger,tdie-prot-disable;
+		ln8000_charger,tbus-mon-disable;
+		ln8000_charger,tbat-mon-disable;
+
+		status = "disabled";
+	};
+
+	sc8551-charger@66 {
+		compatible = "sc,sc8551-standalone";
+		reg = <0x66>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <84 IRQ_TYPE_EDGE_FALLING>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&sc8551_int_default>;
+		sc,sc8551,bat-therm-disable = <0>;
+		sc,sc8551,bus-therm-disable = <0>;
+		sc,sc8551,bat-ovp-threshold = <4525>;
+		sc,sc8551,bat-ovp-alarm-threshold = <4400>;
+		sc,sc8551,bat-ocp-threshold = <8000>;
+		sc,sc8551,bat-ocp-alarm-threshold = <7500>;
+		sc,sc8551,bus-ovp-threshold = <12000>;
+		sc,sc8551,bus-ovp-alarm-threshold = <11000>;
+		sc,sc8551,bus-ocp-threshold = <3750>;
+		sc,sc8551,bus-ocp-alarm-threshold = <3500>;
+		sc,sc8551,bat-ucp-alarm-threshold = <2000>;
+		sc,sc8551,bat-therm-threshold = <21>;
+		sc,sc8551,bus-therm-threshold = <21>;
+		sc,sc8551,die-therm-threshold = <125>;
+		sc,sc8551,ac-ovp-threshold = <12>;
+		sc,sc8551,sense-resistor-mohm = <5>;
+		status = "okay";
+	};
+};
+
+&tlmm {
+	sc8551_int_default: sc8551-int-default-state {
+		pins = "gpio84";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-up;
+		input-enable;
+	};
+};
