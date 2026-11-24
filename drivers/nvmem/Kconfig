@@ -373,6 +373,20 @@ config NVMEM_S32G_OCOTP
 	  If you say Y here, you will get support for the One Time
 	  Programmable memory pages.
 
+config NVMEM_QCOM_DMS_MAC
+	tristate "Qualcomm DMS MAC address provider"
+	depends on ARCH_QCOM || COMPILE_TEST
+	depends on NET && OF
+	select QRTR
+	select QCOM_QMI_HELPERS
+	help
+	  Expose factory-provisioned WLAN MAC addresses obtained from the
+	  Qualcomm Device Management Service (DMS) over QRTR/QMI as a
+	  read-only NVMEM provider.
+
+	  This allows network drivers to consume the address through the
+	  standard "mac-address" NVMEM cell without depending on QMI.
+
 config NVMEM_QCOM_QFPROM
 	tristate "Qualcomm QFPROM Support"
 	depends on ARCH_QCOM || COMPILE_TEST
