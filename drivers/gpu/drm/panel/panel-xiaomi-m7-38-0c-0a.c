@@ -185,6 +185,30 @@ static int xiaomi_m7_38_0c_0a_prepare(struct drm_panel *panel)
 	return 0;
 }
 
+/*
+ * The downstream panel description initializes the panel at 120 Hz in LP
+ * mode, then uses a separate HS-mode command set for dynamic refresh-rate
+ * changes. Keep that power-on sequence intact and issue the stock 60 Hz
+ * command only after the DSI controller has started video transmission.
+ */
+static int xiaomi_m7_38_0c_0a_enable(struct drm_panel *panel)
+{
+	struct xiaomi_m7_38_0c_0a *ctx = to_xiaomi_m7_38_0c_0a(panel);
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
+	unsigned long mode_flags = ctx->dsi->mode_flags;
+
+	/* qcom,mdss-dsi-dispparam-fps-60hz-command-state = "dsi_hs_mode" */
+	ctx->dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
+
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0x5a, 0x5a);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x60, 0x21);
+	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf7, 0x0b);
+
+	ctx->dsi->mode_flags = mode_flags;
+
+	return dsi_ctx.accum_err;
+}
+
 static int xiaomi_m7_38_0c_0a_unprepare(struct drm_panel *panel)
 {
 	struct xiaomi_m7_38_0c_0a *ctx = to_xiaomi_m7_38_0c_0a(panel);
@@ -202,30 +226,49 @@ static int xiaomi_m7_38_0c_0a_unprepare(struct drm_panel *panel)
 	return 0;
 }
 
-static const struct drm_display_mode xiaomi_m7_38_0c_0a_mode = {
+/*
+ * Downstream advertises 120/90/60 Hz and implements DFPS by keeping the
+ * link/pixel clock constant while changing the vertical front porch
+ * (dfps_immediate_porch_mode_vfp).
+ *
+ * The base 120 Hz timing has vtotal = 2432 and vfp = 20. Qualcomm's DFPS
+ * calculation for 60 Hz is:
+ *
+ *   new_vfp = old_vfp + old_vtotal * (old_fps - new_fps) / new_fps
+ *           = 20 + 2432 * 60 / 60
+ *           = 2452
+ *
+ * drm_panel has no mode-switch callback for issuing the panel's matching
+ * DCS command during an atomic refresh-rate change. Until that plumbing is
+ * implemented, expose the stock-correct 60 Hz operating point instead of
+ * forcing the highest 120 Hz mode continuously.
+ */
+static const struct drm_display_mode xiaomi_m7_38_0c_0a_mode_60hz = {
+	/* Keep the downstream 120 Hz link/pixel clock for VFP-based DFPS. */
 	.clock = (1080 + 120 + 28 + 120) * (2400 + 20 + 2 + 10) * 120 / 1000,
 	.hdisplay = 1080,
 	.hsync_start = 1080 + 120,
 	.hsync_end = 1080 + 120 + 28,
 	.htotal = 1080 + 120 + 28 + 120,
 	.vdisplay = 2400,
-	.vsync_start = 2400 + 20,
-	.vsync_end = 2400 + 20 + 2,
-	.vtotal = 2400 + 20 + 2 + 10,
+	.vsync_start = 2400 + 2452,
+	.vsync_end = 2400 + 2452 + 2,
+	.vtotal = 2400 + 2452 + 2 + 10,
 	.width_mm = 69,
 	.height_mm = 154,
-	.type = DRM_MODE_TYPE_DRIVER,
+	.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
 };
 
 static int xiaomi_m7_38_0c_0a_get_modes(struct drm_panel *panel,
 					struct drm_connector *connector)
 {
-	return drm_connector_helper_get_modes_fixed(connector,
-						    &xiaomi_m7_38_0c_0a_mode);
+	return drm_connector_helper_get_modes_fixed(
+		connector, &xiaomi_m7_38_0c_0a_mode_60hz);
 }
 
 static const struct drm_panel_funcs xiaomi_m7_38_0c_0a_panel_funcs = {
 	.prepare = xiaomi_m7_38_0c_0a_prepare,
+	.enable = xiaomi_m7_38_0c_0a_enable,
 	.unprepare = xiaomi_m7_38_0c_0a_unprepare,
 	.get_modes = xiaomi_m7_38_0c_0a_get_modes,
 };
@@ -334,7 +377,7 @@ static int xiaomi_m7_38_0c_0a_probe(struct mipi_dsi_device *dsi)
 	ctx->dsc.dsc_version_major = 1;
 	ctx->dsc.dsc_version_minor = 1;
 	ctx->dsc.slice_height = 20;
-	ctx->dsc.slice_width = xiaomi_m7_38_0c_0a_mode.hdisplay / 2;
+	ctx->dsc.slice_width = xiaomi_m7_38_0c_0a_mode_60hz.hdisplay / 2;
 	ctx->dsc.slice_count = 2;
 	ctx->dsc.bits_per_component = 8;
 	ctx->dsc.bits_per_pixel = 8 << 4; /* 4 fractional bits */
