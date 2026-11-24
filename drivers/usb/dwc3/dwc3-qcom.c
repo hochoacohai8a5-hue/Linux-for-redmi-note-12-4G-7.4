@@ -81,6 +81,7 @@ struct dwc3_qcom {
 	enum usb_dr_mode	mode;
 	bool			is_suspended;
 	bool			pm_suspended;
+	bool			utmi_as_pipe_clk;
 	struct icc_path		*icc_path_ddr;
 	struct icc_path		*icc_path_apps;
 
@@ -127,6 +128,8 @@ static void dwc3_qcom_vbus_override_enable(struct dwc3_qcom *qcom, bool enable)
 				  UTMI_OTG_VBUS_VALID | SW_SESSVLD_SEL);
 	}
 }
+
+static void dwc3_qcom_select_utmi_clk(struct dwc3_qcom *qcom);
 
 static int dwc3_qcom_interconnect_enable(struct dwc3_qcom *qcom)
 {
@@ -387,6 +390,19 @@ static int dwc3_qcom_resume(struct dwc3_qcom *qcom, bool wakeup)
 	ret = dwc3_qcom_interconnect_enable(qcom);
 	if (ret)
 		dev_warn(qcom->dev, "failed to enable interconnect: %d\n", ret);
+
+	/*
+	 * QSCRATCH loses its contents when CX collapses during system
+	 * suspend. Restore the UTMI-as-PIPE selection before resuming the
+	 * core, otherwise HS-only controllers can come back with the PIPE
+	 * domain unclocked and fail to enable ep0out.
+	 *
+	 * Do this only for system resume: runtime suspend does not imply the
+	 * same CX power loss and reprogramming the mux there adds avoidable
+	 * latency.
+	 */
+	if (qcom->pm_suspended && qcom->utmi_as_pipe_clk)
+		dwc3_qcom_select_utmi_clk(qcom);
 
 	/* Clear existing events from PHY related to L2 in/out */
 	for (i = 0; i < qcom->num_ports; i++) {
@@ -680,6 +696,7 @@ static int dwc3_qcom_probe(struct platform_device *pdev)
 	 */
 	ignore_pipe_clk = device_property_read_bool(dev,
 				"qcom,select-utmi-as-pipe-clk");
+	qcom->utmi_as_pipe_clk = ignore_pipe_clk;
 	if (ignore_pipe_clk)
 		dwc3_qcom_select_utmi_clk(qcom);
 
