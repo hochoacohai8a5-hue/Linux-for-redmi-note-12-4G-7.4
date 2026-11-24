@@ -830,6 +830,18 @@ config CHARGER_BQ25890
 	help
 	  Say Y to enable support for the TI BQ25890 battery charger.
 
+config CHARGER_LN8000
+	tristate "Lion Semiconductor LN8000 charge pump"
+	depends on I2C
+	help
+	  Say Y or M to enable support for the Lion Semiconductor LN8000
+	  switched-capacitor direct-charge pump found in some Xiaomi devices.
+
+	  The initial driver identifies the chip, forces it into standby with
+	  hardware protections enabled and exposes read-only telemetry through
+	  the power_supply class. Fast-charge policy is intentionally not
+	  implemented yet.
+
 config CHARGER_BQ25980
 	tristate "TI BQ25980 battery charger driver"
 	depends on I2C
