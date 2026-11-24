@@ -8,6 +8,7 @@
 #define _SNOC_H_
 
 #include <linux/notifier.h>
+#include <linux/workqueue.h>
 
 #include "hw.h"
 #include "ce.h"
@@ -46,6 +47,7 @@ struct ath10k_snoc_ce_irq {
 };
 
 enum ath10k_snoc_flags {
+	ATH10K_SNOC_FLAG_FW_READY,
 	ATH10K_SNOC_FLAG_REGISTERED,
 	ATH10K_SNOC_FLAG_UNREGISTERING,
 	ATH10K_SNOC_FLAG_MODEM_STOPPED,
@@ -76,6 +78,7 @@ struct ath10k_snoc {
 	struct ath10k_snoc_ce_irq ce_irqs[CE_COUNT_MAX];
 	struct ath10k_ce ce;
 	struct timer_list rx_post_retry;
+	struct delayed_work register_work;
 	struct pwrseq_desc *pwrseq;
 	struct regulator_bulk_data *vregs;
 	size_t num_vregs;

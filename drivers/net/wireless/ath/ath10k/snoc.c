@@ -27,6 +27,7 @@
 #include "snoc.h"
 
 #define ATH10K_SNOC_RX_POST_RETRY_MS 50
+#define ATH10K_SNOC_MAC_RETRY_MS 1000
 #define CE_POLL_PIPE 4
 #define ATH10K_SNOC_WAKE_IRQ 2
 
@@ -1368,33 +1369,75 @@ static void ath10k_snoc_quirks_init(struct ath10k *ar)
 		set_bit(ATH10K_SNOC_FLAG_SKIP_HOST_CAP_QUIRK, &ar_snoc->flags);
 }
 
+static void ath10k_snoc_register_work(struct work_struct *work)
+{
+	struct ath10k_snoc *ar_snoc =
+		container_of(to_delayed_work(work), struct ath10k_snoc,
+			     register_work);
+	struct ath10k *ar = ar_snoc->ar;
+	struct ath10k_bus_params bus_params = {};
+	int ret;
+
+	if (test_bit(ATH10K_SNOC_FLAG_UNREGISTERING, &ar_snoc->flags) ||
+	    test_bit(ATH10K_SNOC_FLAG_REGISTERED, &ar_snoc->flags) ||
+	    !test_bit(ATH10K_SNOC_FLAG_FW_READY, &ar_snoc->flags))
+		return;
+
+	/*
+	 * Some SNOC platforms source their factory MAC from a late NVMEM
+	 * provider. In that case device_get_mac_address() returns
+	 * -EPROBE_DEFER until the provider has fetched the address. Do not
+	 * let mac80211 registration fall through to ath10k's random-MAC
+	 * fallback while the platform identity is still pending.
+	 */
+	ret = device_get_mac_address(ar->dev, ar->mac_addr);
+	if (ret == -EPROBE_DEFER) {
+		ath10k_dbg(ar, ATH10K_DBG_SNOC,
+			   "platform MAC not ready, retrying registration\n");
+		queue_delayed_work(ar->workqueue_aux, &ar_snoc->register_work,
+				   msecs_to_jiffies(ATH10K_SNOC_MAC_RETRY_MS));
+		return;
+	}
+
+	if (ret && ret != -ENOENT)
+		ath10k_dbg(ar, ATH10K_DBG_SNOC,
+			   "failed to get platform MAC address: %d\n", ret);
+
+	if (!test_bit(ATH10K_SNOC_FLAG_FW_READY, &ar_snoc->flags))
+		return;
+
+	bus_params.dev_type = ATH10K_DEV_TYPE_LL;
+	bus_params.chip_id = ar_snoc->target_info.soc_version;
+
+	ret = ath10k_core_register(ar, &bus_params);
+	if (ret) {
+		ath10k_err(ar, "Failed to register driver core: %d\n", ret);
+		return;
+	}
+
+	set_bit(ATH10K_SNOC_FLAG_REGISTERED, &ar_snoc->flags);
+}
+
 int ath10k_snoc_fw_indication(struct ath10k *ar, u64 type)
 {
 	struct ath10k_snoc *ar_snoc = ath10k_snoc_priv(ar);
-	struct ath10k_bus_params bus_params = {};
-	int ret;
 
 	if (test_bit(ATH10K_SNOC_FLAG_UNREGISTERING, &ar_snoc->flags))
 		return 0;
 
 	switch (type) {
 	case ATH10K_QMI_EVENT_FW_READY_IND:
+		set_bit(ATH10K_SNOC_FLAG_FW_READY, &ar_snoc->flags);
 		if (test_bit(ATH10K_SNOC_FLAG_REGISTERED, &ar_snoc->flags)) {
 			ath10k_core_start_recovery(ar);
 			break;
 		}
 
-		bus_params.dev_type = ATH10K_DEV_TYPE_LL;
-		bus_params.chip_id = ar_snoc->target_info.soc_version;
-		ret = ath10k_core_register(ar, &bus_params);
-		if (ret) {
-			ath10k_err(ar, "Failed to register driver core: %d\n",
-				   ret);
-			return ret;
-		}
-		set_bit(ATH10K_SNOC_FLAG_REGISTERED, &ar_snoc->flags);
+		mod_delayed_work(ar->workqueue_aux, &ar_snoc->register_work, 0);
 		break;
 	case ATH10K_QMI_EVENT_FW_DOWN_IND:
+		clear_bit(ATH10K_SNOC_FLAG_FW_READY, &ar_snoc->flags);
+		cancel_delayed_work(&ar_snoc->register_work);
 		set_bit(ATH10K_SNOC_FLAG_RECOVERY, &ar_snoc->flags);
 		set_bit(ATH10K_FLAG_CRASH_FLUSH, &ar->dev_flags);
 		break;
@@ -1761,6 +1804,7 @@ static int ath10k_snoc_probe(struct platform_device *pdev)
 	ar_snoc->dev = pdev;
 	platform_set_drvdata(pdev, ar);
 	ar_snoc->ar = ar;
+	INIT_DELAYED_WORK(&ar_snoc->register_work, ath10k_snoc_register_work);
 	ar_snoc->ce.bus_ops = &ath10k_snoc_bus_ops;
 	ar->ce_priv = &ar_snoc->ce;
 	msa_size = drv_data->msa_size;
@@ -1897,6 +1941,7 @@ static int ath10k_snoc_free_resources(struct ath10k *ar)
 	ath10k_dbg(ar, ATH10K_DBG_SNOC, "snoc free resources\n");
 
 	set_bit(ATH10K_SNOC_FLAG_UNREGISTERING, &ar_snoc->flags);
+	cancel_delayed_work_sync(&ar_snoc->register_work);
 
 	ath10k_core_unregister(ar);
 	ath10k_fw_deinit(ar);
