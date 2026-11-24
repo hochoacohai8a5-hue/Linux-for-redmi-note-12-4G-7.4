@@ -722,7 +722,10 @@ irqreturn_t tcpci_irq(struct tcpci *tcpci)
 	int irq_ret;
 	unsigned int raw;
 
-	tcpci_read16(tcpci, TCPC_ALERT, &status);
+	ret = tcpci_read16(tcpci, TCPC_ALERT, &status);
+	if (ret < 0)
+		return IRQ_NONE;
+
 	irq_ret = status & tcpci->alert_mask;
 
 process_status:
@@ -730,15 +733,21 @@ process_status:
 	 * Clear alert status for everything except RX_STATUS, which shouldn't
 	 * be cleared until we have successfully retrieved message.
 	 */
-	if (status & ~TCPC_ALERT_RX_STATUS)
-		tcpci_write16(tcpci, TCPC_ALERT,
-			      status & ~TCPC_ALERT_RX_STATUS);
+	if (status & ~TCPC_ALERT_RX_STATUS) {
+		ret = tcpci_write16(tcpci, TCPC_ALERT,
+				    status & ~TCPC_ALERT_RX_STATUS);
+		if (ret < 0)
+			return IRQ_RETVAL(irq_ret);
+	}
 
 	if (status & TCPC_ALERT_CC_STATUS)
 		tcpm_cc_change(tcpci->port);
 
 	if (status & TCPC_ALERT_POWER_STATUS) {
-		regmap_read(tcpci->regmap, TCPC_POWER_STATUS_MASK, &raw);
+		ret = regmap_read(tcpci->regmap, TCPC_POWER_STATUS_MASK, &raw);
+		if (ret < 0)
+			return IRQ_RETVAL(irq_ret);
+
 		/*
 		 * If power status mask has been reset, then the TCPC
 		 * has reset.
@@ -755,7 +764,10 @@ process_status:
 		enum tcpm_transmit_type rx_type;
 		u16 header;
 
-		regmap_read(tcpci->regmap, TCPC_RX_BYTE_CNT, &cnt);
+		ret = regmap_read(tcpci->regmap, TCPC_RX_BYTE_CNT, &cnt);
+		if (ret < 0)
+			return IRQ_RETVAL(irq_ret);
+
 		/*
 		 * 'cnt' corresponds to READABLE_BYTE_COUNT in section 4.4.14
 		 * of the TCPCI spec [Rev 2.0 Ver 1.0 October 2017] and is
@@ -767,22 +779,30 @@ process_status:
 		else
 			payload_cnt = 0;
 
-		tcpci_read16(tcpci, TCPC_RX_HDR, &header);
+		ret = tcpci_read16(tcpci, TCPC_RX_HDR, &header);
+		if (ret < 0)
+			return IRQ_RETVAL(irq_ret);
+
 		msg.header = cpu_to_le16(header);
 
 		if (WARN_ON(payload_cnt > sizeof(msg.payload)))
 			payload_cnt = sizeof(msg.payload);
 
-		if (payload_cnt > 0)
-			regmap_raw_read(tcpci->regmap, TCPC_RX_DATA,
-					&msg.payload, payload_cnt);
+		if (payload_cnt > 0) {
+			ret = regmap_raw_read(tcpci->regmap, TCPC_RX_DATA,
+					      &msg.payload, payload_cnt);
+			if (ret < 0)
+				return IRQ_RETVAL(irq_ret);
+		}
 
 		ret = regmap_read(tcpci->regmap, TCPC_RX_BUF_FRAME_TYPE, &rx_type);
-		if (ret)
-			return ret;
+		if (ret < 0)
+			return IRQ_RETVAL(irq_ret);
 
 		/* Read complete, clear RX status alert bit */
-		tcpci_write16(tcpci, TCPC_ALERT, TCPC_ALERT_RX_STATUS);
+		ret = tcpci_write16(tcpci, TCPC_ALERT, TCPC_ALERT_RX_STATUS);
+		if (ret < 0)
+			return IRQ_RETVAL(irq_ret);
 
 		rx_type &= TCPC_RX_BUF_FRAME_TYPE_MASK;
 		if (tcpci->rx_type_mask & BIT(rx_type))
@@ -805,7 +825,9 @@ process_status:
 	else if (status & TCPC_ALERT_TX_FAILED)
 		tcpm_pd_transmit_complete(tcpci->port, TCPC_TX_FAILED);
 
-	tcpci_read16(tcpci, TCPC_ALERT, &status);
+	ret = tcpci_read16(tcpci, TCPC_ALERT, &status);
+	if (ret < 0)
+		return IRQ_RETVAL(irq_ret);
 
 	if (status & tcpci->alert_mask)
 		goto process_status;

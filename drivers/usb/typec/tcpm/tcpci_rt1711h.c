@@ -9,6 +9,7 @@
 #include <linux/bits.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/pm.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/gpio/consumer.h>
@@ -367,6 +368,33 @@ static void rt1711h_unregister_tcpci_port(void *tcpci)
 	tcpci_unregister_port(tcpci);
 }
 
+static int rt1711h_suspend(struct device *dev)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+
+	/*
+	 * The alert handler performs I2C transfers. Keep it from running after
+	 * the GENI I2C parent has started suspending; the IRQ remains armed as
+	 * a wake source and any pending level interrupt is handled after the
+	 * parent has resumed.
+	 */
+	disable_irq(client->irq);
+
+	return 0;
+}
+
+static int rt1711h_resume(struct device *dev)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+
+	enable_irq(client->irq);
+
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(rt1711h_pm_ops,
+				rt1711h_suspend, rt1711h_resume);
+
 static const struct rt1711h_chip_info rt1711h = {
 };
 
@@ -395,6 +423,7 @@ static struct i2c_driver rt1711h_i2c_driver = {
 	.driver = {
 		.name = "rt1711h",
 		.of_match_table = rt1711h_of_match,
+		.pm = pm_sleep_ptr(&rt1711h_pm_ops),
 	},
 	.probe = rt1711h_probe,
 	.id_table = rt1711h_id,
