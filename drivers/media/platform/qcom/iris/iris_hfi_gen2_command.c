@@ -1214,17 +1214,22 @@ static int iris_hfi_gen2_session_resume_drc(struct iris_inst *inst, u32 plane)
 static int iris_hfi_gen2_session_resume_drain(struct iris_inst *inst, u32 plane)
 {
 	struct iris_inst_hfi_gen2 *inst_hfi_gen2 = to_iris_inst_hfi_gen2(inst);
-	u32 payload = HFI_CMD_DRAIN;
 
+	/*
+	 * RESUME does not carry the command that caused the pause. AR50_LITE
+	 * treats a payload on RESUME as an informational/unsupported request and
+	 * can leave the port paused. This is the same protocol rule used by the
+	 * normal DRC resume path and by Qualcomm's downstream msm-vidc encoder.
+	 */
 	iris_hfi_gen2_packet_session_command(inst,
 					     HFI_CMD_RESUME,
 					     (HFI_HOST_FLAGS_RESPONSE_REQUIRED |
 					     HFI_HOST_FLAGS_INTR_REQUIRED),
 					     iris_hfi_gen2_get_port(inst, plane),
 					     inst->session_id,
-					     HFI_PAYLOAD_U32,
-					     &payload,
-					     sizeof(u32));
+					     HFI_PAYLOAD_NONE,
+					     NULL,
+					     0);
 
 	return iris_hfi_queue_cmd_write(inst->core, inst_hfi_gen2->packet,
 					inst_hfi_gen2->packet->size);
